@@ -734,8 +734,8 @@ def create_block_device(module, ec2, volume):
     # http://aws.amazon.com/about-aws/whats-new/2013/10/09/ebs-provisioned-iops-maximum-iops-gb-ratio-increased-to-30-1/
     MAX_IOPS_TO_SIZE_RATIO = 30
 
-    # device_type has been used historically to represent volume_type, 
-    # however ec2_vol uses volume_type, as does the BlockDeviceType, so 
+    # device_type has been used historically to represent volume_type,
+    # however ec2_vol uses volume_type, as does the BlockDeviceType, so
     # we add handling for either/or but not both
     if all(key in volume for key in ['device_type','volume_type']):
         module.fail_json(msg = 'device_type is a deprecated name for volume_type. Do not use both device_type and volume_type')
@@ -818,7 +818,7 @@ def enforce_count(module, ec2, vpc):
             instances = [ x for x in instances if x.id not in remove_ids]
 
             (changed, instance_dict_array, changed_instance_ids) \
-                = terminate_instances(module, ec2, remove_ids)
+                = terminate_instances(module, ec2, remove_ids, {})
             terminated_list = []
             for inst in instance_dict_array:
                 inst['state'] = "terminated"
@@ -1160,14 +1160,16 @@ def create_instances(module, ec2, vpc, override_count=None):
     return (instance_dict_array, created_instance_ids, changed)
 
 
-def terminate_instances(module, ec2, instance_ids):
+def terminate_instances(module, ec2, instance_ids, instance_tags):
     """
     Terminates a list of instances
 
     module: Ansible module object
     ec2: authenticated ec2 connection object
-    termination_list: a list of instances to terminate in the form of
+    instance_ids: a list of instances to terminate in the form of
       [ {id: <inst-id>}, ..]
+    instance_tags: A dict of tag keys and values in the form of
+      {key: value, ... }
 
     Returns a dictionary of instance information
     about the instances terminated.
@@ -1175,6 +1177,8 @@ def terminate_instances(module, ec2, instance_ids):
     If the instance to be terminated is running
     "changed" will be set to False.
 
+    Note that if instance_ids and instance_tags are both non-empty,
+    this method will process the intersection of the two
     """
 
     # Whether to wait for termination to complete before returning
@@ -1185,10 +1189,20 @@ def terminate_instances(module, ec2, instance_ids):
     instance_dict_array = []
 
     if not isinstance(instance_ids, list) or len(instance_ids) < 1:
-        module.fail_json(msg='instance_ids should be a list of instances, aborting')
+        # Fail unless the user defined instance tags
+        if not instance_tags:
+            module.fail_json(msg='instance_ids should be a list of instances, aborting')
+
+    # To make an EC2 tag filter, we need to prepend 'tag:' to each key.
+    # An empty filter does no filtering, so it's safe to pass it to the
+    # get_all_instances method even if the user did not specify instance_tags
+    filters = {}
+    if instance_tags:
+        for key, value in instance_tags.items():
+            filters["tag:" + key] = value
 
     terminated_instance_ids = []
-    for res in ec2.get_all_instances(instance_ids):
+    for res in ec2.get_all_instances(instance_ids, filters=filters):
         for inst in res.instances:
             if inst.state == 'running' or inst.state == 'stopped':
                 terminated_instance_ids.append(inst.id)
@@ -1400,20 +1414,16 @@ def main():
 
     state = module.params['state']
 
-    if state == 'absent':
-        instance_ids = module.params['instance_ids']
-        if not instance_ids:
-            module.fail_json(msg='instance_ids list is required for absent state')
-
-        (changed, instance_dict_array, new_instance_ids) = terminate_instances(module, ec2, instance_ids)
-
-    elif state in ('running', 'stopped'):
+    if state in ('absent', 'running', 'stopped'):
         instance_ids = module.params.get('instance_ids')
         instance_tags = module.params.get('instance_tags')
         if not (isinstance(instance_ids, list) or isinstance(instance_tags, dict)):
             module.fail_json(msg='running list needs to be a list of instances or set of tags to run: %s' % instance_ids)
 
-        (changed, instance_dict_array, new_instance_ids) = startstop_instances(module, ec2, instance_ids, state, instance_tags)
+        if state == 'absent':
+            (changed, instance_dict_array, new_instance_ids) = terminate_instances(module, ec2, instance_ids, instance_tags)
+        else:
+            (changed, instance_dict_array, new_instance_ids) = startstop_instances(module, ec2, instance_ids, state, instance_tags)
 
     elif state == 'present':
         # Changed is always set to true when provisioning new instances
